@@ -19,7 +19,7 @@ if current_dir not in sys.path:
     sys.path.insert(0, current_dir)
 
 # SkinTokens internal imports
-from src.rig_package.info.mixamo_mapper import map_asset_to_mixamo
+from src.rig_package.info.mixamo_mapper import map_asset_to_mixamo, validate_mixamo_mapping
 from src.data.dataset import DatasetConfig, RigDatasetModule
 from src.data.transform import Transform
 from src.model.tokenrig import TokenRigResult
@@ -256,18 +256,21 @@ class SkinTokensGenerator:
                 "use_transfer": ("BOOLEAN", {"default": True, "label_on": "Yes", "label_off": "No", "tooltip": "IMPORTANT: Set to 'Yes' to preserve textures, materials, and original mesh quality from your input file."}),
                 "use_postprocess": ("BOOLEAN", {"default": False, "label_on": "Yes", "label_off": "No"}),
                 "use_mixamo": ("BOOLEAN", {"default": False, "label_on": "Yes", "label_off": "No"}),
+                "enforce_tpose": ("BOOLEAN", {"default": True, "label_on": "Yes", "label_off": "No", "tooltip": "Rotate arms to T-pose for Mixamo animation compatibility. Only applies when use_mixamo=True."}),
+                "bottom_center_origin": ("BOOLEAN", {"default": True, "label_on": "Yes", "label_off": "No", "tooltip": "Align skeleton origin to feet (bottom-center of mesh bounding box). Recommended for game engines and Three.js."}),
                 "output_format": ([".glb", ".fbx", ".obj"], {"default": ".glb"}),
                 "bpy_server_mode": (["Embedded (bpy)", "Headless (Blender)"], {"default": "Embedded (bpy)"}),
             }
         }
 
-    RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("output_mesh_path",)
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("output_mesh_path", "rig_report")
     FUNCTION = "generate"
     CATEGORY = "SkinTokens"
-    
-    def generate(self, model, input_mesh, top_k, top_p, temperature, repetition_penalty, num_beams, 
-                 use_skeleton, use_transfer, use_postprocess, use_mixamo, output_format, bpy_server_mode):
+
+    def generate(self, model, input_mesh, top_k, top_p, temperature, repetition_penalty, num_beams,
+                 use_skeleton, use_transfer, use_postprocess, use_mixamo, enforce_tpose,
+                 bottom_center_origin, output_format, bpy_server_mode):
         
         if not input_mesh:
             raise ValueError("No input mesh path provided.")
@@ -358,8 +361,10 @@ class SkinTokensGenerator:
             asset = preds[0].asset
             assert asset is not None
 
+            rig_report = ""
             if use_mixamo:
                 asset.joint_names = map_asset_to_mixamo(asset.joints, asset.parents)
+                rig_report = validate_mixamo_mapping(asset.joint_names, asset.joints, asset.parents)
 
             if use_postprocess:
                 voxel = asset.voxel(resolution=196)
@@ -376,12 +381,17 @@ class SkinTokensGenerator:
 
             out_path.parent.mkdir(parents=True, exist_ok=True)
 
+            # T-pose only meaningful with Mixamo names
+            should_tpose = enforce_tpose and use_mixamo
+
             if use_transfer:
                 payload = dict(
                     source_asset=asset,
                     target_path=asset.path,
                     export_path=str(out_path),
                     group_per_vertex=4,
+                    enforce_tpose=should_tpose,
+                    bottom_center_origin=bottom_center_origin,
                 )
                 res = post_bpy_payload("transfer", payload)
             else:
@@ -389,6 +399,8 @@ class SkinTokensGenerator:
                     asset=asset,
                     filepath=str(out_path),
                     group_per_vertex=4,
+                    enforce_tpose=should_tpose,
+                    bottom_center_origin=bottom_center_origin,
                 )
                 res = post_bpy_payload("export", payload)
 
@@ -397,7 +409,7 @@ class SkinTokensGenerator:
             else:
                 print(f"[SkinTokens] Successfully exported rigged model to: {out_path}")
 
-        return (str(out_path), )
+        return (str(out_path), rig_report)
 
 
 class SkinTokensRigPreviewer:

@@ -168,6 +168,114 @@ def map_asset_to_mixamo(joints: np.ndarray, parents: np.ndarray) -> List[str]:
             
     return final_names
 
+CORE_BODY_BONES = [
+    "mixamorig:Hips",
+    "mixamorig:Spine", "mixamorig:Spine1", "mixamorig:Spine2",
+    "mixamorig:Neck", "mixamorig:Head",
+    "mixamorig:LeftShoulder", "mixamorig:LeftArm", "mixamorig:LeftForeArm", "mixamorig:LeftHand",
+    "mixamorig:RightShoulder", "mixamorig:RightArm", "mixamorig:RightForeArm", "mixamorig:RightHand",
+    "mixamorig:LeftUpLeg", "mixamorig:LeftLeg", "mixamorig:LeftFoot", "mixamorig:LeftToeBase",
+    "mixamorig:RightUpLeg", "mixamorig:RightLeg", "mixamorig:RightFoot", "mixamorig:RightToeBase",
+]
+
+
+def validate_mixamo_mapping(labels: List[str], joints: np.ndarray, parents: np.ndarray) -> str:
+    """
+    Validate a Mixamo bone mapping and return a structured report.
+    Warns on two specific failure signatures:
+    - Spine depth > 4 before shoulder branch (over-segmentation)
+    - Left/right arm chain length asymmetry (misassignment)
+    """
+    J = len(labels)
+
+    # Which core bones mapped vs stayed bone_N
+    mapped = [b for b in CORE_BODY_BONES if b in labels]
+    unmapped = [b for b in CORE_BODY_BONES if b not in labels]
+    residual = [l for l in labels if l.startswith("bone_")]
+
+    # Spine depth: count bones from Hips to the first 3+ branching node
+    children = {i: [] for i in range(J)}
+    for i in range(J):
+        if parents[i] != -1:
+            children[parents[i]].append(i)
+
+    spine_depth = 0
+    hips_idx = None
+    for i, l in enumerate(labels):
+        if l == "mixamorig:Hips":
+            hips_idx = i
+            break
+
+    if hips_idx is not None:
+        # Walk upward through single-child spine chain
+        curr = None
+        for c in children[hips_idx]:
+            if labels[c].startswith("mixamorig:Spine") or labels[c].startswith("bone_"):
+                # Find the spine child (highest Z, matching the mapper logic)
+                if curr is None or joints[c][2] > joints[curr][2]:
+                    curr = c
+        while curr is not None:
+            spine_depth += 1
+            kids = children[curr]
+            if len(kids) == 1:
+                curr = kids[0]
+            else:
+                break  # Hit the shoulder branch or a leaf
+
+    # Arm chain lengths
+    def chain_length(start_name):
+        idx = None
+        for i, l in enumerate(labels):
+            if l == start_name:
+                idx = i
+                break
+        if idx is None:
+            return 0
+        length = 0
+        curr = idx
+        while curr is not None:
+            length += 1
+            kids = children[curr]
+            if len(kids) == 1:
+                curr = kids[0]
+            elif len(kids) > 1:
+                curr = kids[0]  # Follow first child (fingers branch)
+                length += 1
+                break
+            else:
+                break
+        return length
+
+    left_arm_len = chain_length("mixamorig:LeftShoulder")
+    right_arm_len = chain_length("mixamorig:RightShoulder")
+
+    # Build report
+    lines = []
+    lines.append(f"[Mixamo Mapping Report]")
+    lines.append(f"  Mapped: {len(mapped)}/{len(CORE_BODY_BONES)} core bones")
+    if unmapped:
+        lines.append(f"  Missing: {', '.join(unmapped)}")
+    if residual:
+        lines.append(f"  Unmapped bones: {len(residual)} ({', '.join(residual[:5])}{'...' if len(residual) > 5 else ''})")
+    lines.append(f"  Spine depth (Hips→shoulder branch): {spine_depth}")
+    lines.append(f"  Left arm chain: {left_arm_len}, Right arm chain: {right_arm_len}")
+
+    # Trigger warnings on the two diagnostic signatures
+    if spine_depth > 4:
+        msg = f"  WARNING: Spine depth {spine_depth} > 4 — likely over-segmented skeleton"
+        lines.append(msg)
+        print(f"[SkinTokens] {msg}")
+
+    if left_arm_len != right_arm_len:
+        msg = f"  WARNING: Arm chain asymmetry (L={left_arm_len}, R={right_arm_len}) — likely misassignment"
+        lines.append(msg)
+        print(f"[SkinTokens] {msg}")
+
+    report = "\n".join(lines)
+    print(report)
+    return report
+
+
 def main():
     parser = argparse.ArgumentParser(description="Standalone Mixamo Bone Mapper")
     parser.add_argument("--input", required=True, help="Path to input 3D file (fbx, glb, obj)")

@@ -219,12 +219,54 @@ class BpyParser(AbstractParser):
     
     @classmethod
     def export_asset(cls, asset: Asset, filepath: str, **kwargs):
-        use_origin = kwargs.pop('use_origin', False) if 'use_origin' in kwargs else False
-        # Root Cause Fix: DO NOT clean_bpy here. 
+        # Pop post-make_asset flags before they reach make_asset's kwargs
+        enforce_tpose = kwargs.pop('enforce_tpose', False)
+        bottom_center_origin = kwargs.pop('bottom_center_origin', False)
+        kwargs.pop('use_origin', None)  # Remove dead flag (was never implemented)
+
+        # Root Cause Fix: DO NOT clean_bpy here.
         # We need to preserve the images loaded during the 'load()' phase.
         make_asset(asset=asset, **kwargs)
+
+        # --- Post-make_asset transforms (operate on bpy objects) ---
+
+        # Find the armature and mesh objects
+        armature_obj = None
+        mesh_objs = []
+        for obj in bpy.data.objects:
+            if obj.type == 'ARMATURE':
+                armature_obj = obj
+            elif obj.type == 'MESH':
+                mesh_objs.append(obj)
+
+        # Normalize all transforms to identity before T-pose/Z-offset math.
+        # GLB imports (especially Tripo via transfer path) commonly carry a non-identity
+        # matrix_world (axis-conversion rotation, scale node). Our T-pose and Z-offset
+        # functions measure in world space but mutate in local space (v.co, edit_bones),
+        # which only works when world == local, i.e. matrix_world is identity.
+        # transform_apply bakes the object transform into the data, making both spaces
+        # coincide. When already identity (direct-export path), this is a no-op.
+        if enforce_tpose or bottom_center_origin:
+            bpy.ops.object.select_all(action='DESELECT')
+            all_objs = [o for o in [armature_obj] + mesh_objs if o is not None]
+            for obj in all_objs:
+                obj.select_set(True)
+            if all_objs:
+                bpy.context.view_layer.objects.active = all_objs[0]
+                bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
+                print(f"[SkinTokens] Applied transforms to {len(all_objs)} objects (world→local normalization)")
+            bpy.ops.object.select_all(action='DESELECT')
+
+        # Change A: T-pose enforcement
+        if enforce_tpose and armature_obj is not None and len(mesh_objs) > 0:
+            _enforce_tpose_bpy(armature_obj, mesh_objs)
+
+        # Change B: bottom_center_origin (feet at Z=0)
+        if bottom_center_origin and len(mesh_objs) > 0:
+            _bottom_center_origin_bpy(armature_obj, mesh_objs)
+
         cls._safe_make_dir(filepath)
-        
+
         _, ext = os.path.splitext(filepath)
         ext = ext.lower()[1:]
         if ext == 'fbx':
@@ -505,6 +547,229 @@ def get_matrix_basis(bones=None):
         for (id, pbone) in enumerate(bones):
             matrix_basis[frame, id] = np.array(pbone.matrix_basis)
     return matrix_basis
+
+def _enforce_tpose_bpy(armature_obj, mesh_objs):
+    """
+    Post-transfer T-pose enforcement on bpy objects.
+    Detects arm orientation from Mixamo-named bones and rotates arms to horizontal,
+    deforming the mesh via LBS through the transferred vertex groups.
+    Only operates when Mixamo bone names are present on the armature.
+    """
+    armature = armature_obj.data
+
+    # Look up arm bones by Mixamo name
+    bone_names = [b.name for b in armature.bones]
+    name_to_idx = {n: i for i, n in enumerate(bone_names)}
+
+    l_arm_name = "mixamorig:LeftArm"
+    r_arm_name = "mixamorig:RightArm"
+    l_hand_name = "mixamorig:LeftHand"
+    r_hand_name = "mixamorig:RightHand"
+    l_forearm_name = "mixamorig:LeftForeArm"
+    r_forearm_name = "mixamorig:RightForeArm"
+
+    # Need at least shoulders to proceed
+    if l_arm_name not in name_to_idx or r_arm_name not in name_to_idx:
+        print("[SkinTokens T-pose] No Mixamo arm bones found, skipping T-pose enforcement")
+        return
+
+    # Get arm endpoint — prefer Hand, fall back to ForeArm
+    l_end_name = l_hand_name if l_hand_name in name_to_idx else (l_forearm_name if l_forearm_name in name_to_idx else None)
+    r_end_name = r_hand_name if r_hand_name in name_to_idx else (r_forearm_name if r_forearm_name in name_to_idx else None)
+
+    if l_end_name is None or r_end_name is None:
+        print("[SkinTokens T-pose] Cannot find arm endpoints, skipping")
+        return
+
+    # Read bone head positions in world space
+    def bone_head_world(bone_name):
+        bone = armature.bones[bone_name]
+        return np.array(armature_obj.matrix_world @ bone.head_local)
+
+    l_shoulder = bone_head_world(l_arm_name)
+    r_shoulder = bone_head_world(r_arm_name)
+    l_hand = bone_head_world(l_end_name)
+    r_hand = bone_head_world(r_end_name)
+
+    l_arm_vec = l_hand - l_shoulder
+    r_arm_vec = r_hand - r_shoulder
+    l_arm_len = np.linalg.norm(l_arm_vec)
+    r_arm_len = np.linalg.norm(r_arm_vec)
+
+    if l_arm_len < 1e-6 or r_arm_len < 1e-6:
+        print("[SkinTokens T-pose] Arm length too small, skipping")
+        return
+
+    l_arm_dir = l_arm_vec / l_arm_len
+    r_arm_dir = r_arm_vec / r_arm_len
+
+    # Check if already T-posed (X component dominant)
+    l_horizontal = abs(l_arm_dir[0]) > 0.9
+    r_horizontal = abs(r_arm_dir[0]) > 0.9
+
+    if l_horizontal and r_horizontal:
+        print("[SkinTokens T-pose] Arms already horizontal, skipping")
+        return
+
+    print(f"[SkinTokens T-pose] Arm directions: L={l_arm_dir}, R={r_arm_dir}")
+    print(f"[SkinTokens T-pose] Enforcing T-pose...")
+
+    # Target directions in Blender Z-up world
+    l_target = np.array([1.0, 0.0, 0.0])   # Left arm extends +X
+    r_target = np.array([-1.0, 0.0, 0.0])  # Right arm extends -X
+
+    # Compute rotation quaternions
+    from mathutils import Quaternion as MQuaternion
+
+    def compute_rotation(current_dir, target_dir):
+        c = Vector(current_dir.tolist())
+        t = Vector(target_dir.tolist())
+        return c.rotation_difference(t)
+
+    l_rotation = compute_rotation(l_arm_dir, l_target) if not l_horizontal else MQuaternion()
+    r_rotation = compute_rotation(r_arm_dir, r_target) if not r_horizontal else MQuaternion()
+
+    # Collect bone names for each arm (including fingers)
+    left_arm_bones = set()
+    right_arm_bones = set()
+    for name in bone_names:
+        if name in (l_arm_name, l_forearm_name, l_hand_name) or name.startswith("mixamorig:LeftHand"):
+            left_arm_bones.add(name)
+        elif name in (r_arm_name, r_forearm_name, r_hand_name) or name.startswith("mixamorig:RightHand"):
+            right_arm_bones.add(name)
+
+    # Deform mesh vertices through transferred vertex groups (LBS)
+    for mesh_obj in mesh_objs:
+        mesh_data = mesh_obj.data
+        vgroups = mesh_obj.vertex_groups
+
+        # Build group index → bone name map
+        group_to_bone = {}
+        for vg in vgroups:
+            group_to_bone[vg.index] = vg.name
+
+        # Build per-vertex weight lookups for arm bones
+        left_group_indices = [vg.index for vg in vgroups if vg.name in left_arm_bones]
+        right_group_indices = [vg.index for vg in vgroups if vg.name in right_arm_bones]
+
+        if not left_group_indices and not right_group_indices:
+            continue
+
+        transformed_count = 0
+        for v in mesh_data.vertices:
+            left_weight = 0.0
+            right_weight = 0.0
+
+            for g in v.groups:
+                if g.group in left_group_indices:
+                    left_weight += g.weight
+                elif g.group in right_group_indices:
+                    right_weight += g.weight
+
+            if left_weight < 0.001 and right_weight < 0.001:
+                continue
+
+            displacement = Vector((0, 0, 0))
+
+            if left_weight > 0.001 and not l_horizontal:
+                rel_pos = Vector(v.co) - Vector(l_shoulder.tolist())
+                rotated = l_rotation @ rel_pos
+                displacement += (rotated - rel_pos) * left_weight
+
+            if right_weight > 0.001 and not r_horizontal:
+                rel_pos = Vector(v.co) - Vector(r_shoulder.tolist())
+                rotated = r_rotation @ rel_pos
+                displacement += (rotated - rel_pos) * right_weight
+
+            v.co += displacement
+            transformed_count += 1
+
+        mesh_data.update()
+        print(f"[SkinTokens T-pose] Deformed {transformed_count}/{len(mesh_data.vertices)} vertices on {mesh_obj.name}")
+
+    # Move armature bones to T-pose positions in edit mode
+    bpy.context.view_layer.objects.active = armature_obj
+    bpy.ops.object.mode_set(mode='EDIT')
+
+    edit_bones = armature_obj.data.edit_bones
+
+    def move_bone_chain(shoulder_name, target_dir, rotation):
+        """Move a chain of bones (shoulder→elbow→hand→fingers) to T-pose."""
+        shoulder_bone = edit_bones.get(shoulder_name)
+        if not shoulder_bone:
+            return
+
+        shoulder_head = np.array(shoulder_bone.head)
+
+        # Walk the chain and rotate each bone
+        def rotate_bone_recursive(bone):
+            # Rotate head and tail relative to shoulder pivot
+            for attr in ['head', 'tail']:
+                pos = np.array(getattr(bone, attr))
+                rel = pos - shoulder_head
+                rotated = np.array(rotation @ Vector(rel.tolist()))
+                new_pos = shoulder_head + rotated
+                setattr(bone, attr, Vector(new_pos.tolist()))
+
+            for child in bone.children:
+                rotate_bone_recursive(child)
+
+        rotate_bone_recursive(shoulder_bone)
+
+    if not l_horizontal:
+        move_bone_chain(l_arm_name, l_target, l_rotation)
+    if not r_horizontal:
+        move_bone_chain(r_arm_name, r_target, r_rotation)
+
+    bpy.ops.object.mode_set(mode='OBJECT')
+    print("[SkinTokens T-pose] T-pose enforcement complete")
+
+
+def _bottom_center_origin_bpy(armature_obj, mesh_objs):
+    """
+    Shift armature + mesh so the mesh's bottom-center sits at Z=0 (Blender Z-up world).
+    The glTF exporter's Z-up→Y-up pass maps Z=0 → Y=0 automatically.
+    """
+    # Compute mesh bounding box min-Z across all mesh objects
+    global_min_z = float('inf')
+    for mesh_obj in mesh_objs:
+        # Get world-space vertex positions
+        world_matrix = mesh_obj.matrix_world
+        for v in mesh_obj.data.vertices:
+            world_pos = world_matrix @ v.co
+            if world_pos.z < global_min_z:
+                global_min_z = world_pos.z
+
+    if global_min_z == float('inf'):
+        print("[SkinTokens Origin] No mesh vertices found, skipping")
+        return
+
+    if abs(global_min_z) < 1e-6:
+        print("[SkinTokens Origin] Feet already at Z=0, skipping")
+        return
+
+    z_offset = -global_min_z
+    print(f"[SkinTokens Origin] Shifting by Z={z_offset:.4f} (feet from Z={global_min_z:.4f} to Z=0)")
+
+    # Shift both armature and all mesh objects
+    # Move the mesh vertices directly (not the object transform) to keep bind consistent
+    for mesh_obj in mesh_objs:
+        for v in mesh_obj.data.vertices:
+            v.co.z += z_offset
+        mesh_obj.data.update()
+
+    # Shift armature bones in edit mode (tails travel with joints because
+    # both head and tail are shifted in the same edit-bone loop)
+    if armature_obj is not None:
+        bpy.context.view_layer.objects.active = armature_obj
+        bpy.ops.object.mode_set(mode='EDIT')
+        for bone in armature_obj.data.edit_bones:
+            bone.head.z += z_offset
+            bone.tail.z += z_offset
+        bpy.ops.object.mode_set(mode='OBJECT')
+
+    print("[SkinTokens Origin] Bottom-center origin applied (feet at Z=0)")
+
 
 def make_asset(
     asset: Asset,
