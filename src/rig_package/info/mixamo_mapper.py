@@ -11,37 +11,37 @@ sys.path.append(str(Path(__file__).parent.parent.parent.parent))
 from src.rig_package.parser.bpy import BpyParser
 
 MIXAMO_NAMES = {
-    "Pelvis": "mixamorig:Hips",
-    "L_Hip": "mixamorig:LeftUpLeg",
-    "L_Knee": "mixamorig:LeftLeg",
-    "L_Ankle": "mixamorig:LeftFoot",
-    "L_Foot": "mixamorig:LeftToeBase",
-    "L_Toe": "mixamorig:LeftToeBase",
-    "R_Hip": "mixamorig:RightUpLeg",
-    "R_Knee": "mixamorig:RightLeg",
-    "R_Ankle": "mixamorig:RightFoot",
-    "R_Foot": "mixamorig:RightToeBase",
-    "R_Toe": "mixamorig:RightToeBase",
-    "Spine1": "mixamorig:Spine",
-    "Spine2": "mixamorig:Spine1",
-    "Spine3": "mixamorig:Spine2",
-    "Neck": "mixamorig:Neck",
-    "Head": "mixamorig:Head",
-    "HeadTop": "mixamorig:HeadTop_End",
-    "L_Collar": "mixamorig:LeftShoulder",
-    "L_Shoulder": "mixamorig:LeftArm",
-    "L_Elbow": "mixamorig:LeftForeArm",
-    "L_Wrist": "mixamorig:LeftHand",
-    "R_Collar": "mixamorig:RightShoulder",
-    "R_Shoulder": "mixamorig:RightArm",
-    "R_Elbow": "mixamorig:RightForeArm",
-    "R_Wrist": "mixamorig:RightHand",
+    "Pelvis": "endure:Hips",
+    "L_Hip": "endure:LeftUpLeg",
+    "L_Knee": "endure:LeftLeg",
+    "L_Ankle": "endure:LeftFoot",
+    "L_Foot": "endure:LeftToeBase",
+    "L_Toe": "endure:LeftToeBase",
+    "R_Hip": "endure:RightUpLeg",
+    "R_Knee": "endure:RightLeg",
+    "R_Ankle": "endure:RightFoot",
+    "R_Foot": "endure:RightToeBase",
+    "R_Toe": "endure:RightToeBase",
+    "Spine1": "endure:Spine",
+    "Spine2": "endure:Spine1",
+    "Spine3": "endure:Spine2",
+    "Neck": "endure:Neck",
+    "Head": "endure:Head",
+    "HeadTop": "endure:HeadTop_End",
+    "L_Collar": "endure:LeftShoulder",
+    "L_Shoulder": "endure:LeftArm",
+    "L_Elbow": "endure:LeftForeArm",
+    "L_Wrist": "endure:LeftHand",
+    "R_Collar": "endure:RightShoulder",
+    "R_Shoulder": "endure:RightArm",
+    "R_Elbow": "endure:RightForeArm",
+    "R_Wrist": "endure:RightHand",
 }
 
 for prefix, m_prefix in [("L", "LeftHand"), ("R", "RightHand")]:
     for f in ["Thumb", "Index", "Middle", "Ring", "Pinky"]:
         for i in [1, 2, 3]:
-            MIXAMO_NAMES[f"{prefix}_{f}{i}"] = f"mixamorig:{m_prefix}{f}{i}"
+            MIXAMO_NAMES[f"{prefix}_{f}{i}"] = f"endure:{m_prefix}{f}{i}"
 
 def map_asset_to_mixamo(joints: np.ndarray, parents: np.ndarray) -> List[str]:
     """
@@ -169,13 +169,13 @@ def map_asset_to_mixamo(joints: np.ndarray, parents: np.ndarray) -> List[str]:
     return final_names
 
 CORE_BODY_BONES = [
-    "mixamorig:Hips",
-    "mixamorig:Spine", "mixamorig:Spine1", "mixamorig:Spine2",
-    "mixamorig:Neck", "mixamorig:Head",
-    "mixamorig:LeftShoulder", "mixamorig:LeftArm", "mixamorig:LeftForeArm", "mixamorig:LeftHand",
-    "mixamorig:RightShoulder", "mixamorig:RightArm", "mixamorig:RightForeArm", "mixamorig:RightHand",
-    "mixamorig:LeftUpLeg", "mixamorig:LeftLeg", "mixamorig:LeftFoot", "mixamorig:LeftToeBase",
-    "mixamorig:RightUpLeg", "mixamorig:RightLeg", "mixamorig:RightFoot", "mixamorig:RightToeBase",
+    "endure:Hips",
+    "endure:Spine", "endure:Spine1", "endure:Spine2",
+    "endure:Neck", "endure:Head",
+    "endure:LeftShoulder", "endure:LeftArm", "endure:LeftForeArm", "endure:LeftHand",
+    "endure:RightShoulder", "endure:RightArm", "endure:RightForeArm", "endure:RightHand",
+    "endure:LeftUpLeg", "endure:LeftLeg", "endure:LeftFoot", "endure:LeftToeBase",
+    "endure:RightUpLeg", "endure:RightLeg", "endure:RightFoot", "endure:RightToeBase",
 ]
 
 
@@ -202,7 +202,7 @@ def validate_mixamo_mapping(labels: List[str], joints: np.ndarray, parents: np.n
     spine_depth = 0
     hips_idx = None
     for i, l in enumerate(labels):
-        if l == "mixamorig:Hips":
+        if l == "endure:Hips":
             hips_idx = i
             break
 
@@ -210,7 +210,7 @@ def validate_mixamo_mapping(labels: List[str], joints: np.ndarray, parents: np.n
         # Walk upward through single-child spine chain
         curr = None
         for c in children[hips_idx]:
-            if labels[c].startswith("mixamorig:Spine") or labels[c].startswith("bone_"):
+            if labels[c].startswith("endure:Spine") or labels[c].startswith("bone_"):
                 # Find the spine child (highest Z, matching the mapper logic)
                 if curr is None or joints[c][2] > joints[curr][2]:
                     curr = c
@@ -246,8 +246,8 @@ def validate_mixamo_mapping(labels: List[str], joints: np.ndarray, parents: np.n
                 break
         return length
 
-    left_arm_len = chain_length("mixamorig:LeftShoulder")
-    right_arm_len = chain_length("mixamorig:RightShoulder")
+    left_arm_len = chain_length("endure:LeftShoulder")
+    right_arm_len = chain_length("endure:RightShoulder")
 
     # Build report
     lines = []
